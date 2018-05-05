@@ -1,14 +1,23 @@
 package edu.buffalo.cse.cse486586.simpledynamo;
 
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.lang.reflect.Type;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketException;
+import java.net.UnknownHostException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -36,13 +45,16 @@ public class SimpleDynamoProvider extends ContentProvider {
     private String id = "";
     private String seperator = "/simpledynamo/";
     List<String> Keys = new ArrayList<String>();
+    List<String> MyKeys = new ArrayList<String>();
     private String predecessor = "";
+    private String predecessor2 = "";
     private String successor = "";
     private String portStr = "";
-    private  Object myobject = new Object();
+    private  static final Object myobject = new Object();
     private boolean condition = false;
     private String queryvalue = "";
     private String Gqueryvalues = "";
+    private static String failedprocess = "";
 
 	@Override
 	public int delete(Uri uri, String selection, String[] selectionArgs) {
@@ -56,6 +68,9 @@ public class SimpleDynamoProvider extends ContentProvider {
             }
         }
 
+        Log.v(TAG, "delete");
+        Log.v(TAG,selection);
+
         if(selection.equals("*"))
         {
             for(int i=0; i< Keys.size(); i++)
@@ -63,13 +78,19 @@ public class SimpleDynamoProvider extends ContentProvider {
                 getContext().deleteFile(Keys.get(i));
             }
             Keys.clear();
+            MyKeys.clear();
 
             //send msg to successor to delete
             String datatosend = "delete";
             datatosend += seperator;
             datatosend += portStr;
 
-            sendMsg(2*Integer.parseInt(successor),datatosend);
+            String reply = sendMsg(2 * Integer.parseInt(successor), datatosend);
+            if(reply.equals("fail"))
+            {
+                String successor2 = getSuccessor(successor);
+                sendMsg(2 * Integer.parseInt(successor2), datatosend);
+            }
         }
         else if(selection.equals("@"))
         {
@@ -78,11 +99,32 @@ public class SimpleDynamoProvider extends ContentProvider {
                 getContext().deleteFile(Keys.get(i));
             }
             Keys.clear();
+            MyKeys.clear();
         }
         else
         {
-            getContext().deleteFile(selection);
-            Keys.remove(selection);
+
+            String coOrdinator = getCoordinator(selection);
+            if(coOrdinator.equals(portStr)) {
+                // delete and send to successors to delete
+                getContext().deleteFile(selection);
+                Keys.remove(selection);
+                MyKeys.remove(selection);
+
+                sendMsg(2*Integer.parseInt(successor),"deletekey"+seperator+"replica"+seperator+selection);
+                String successor2 = getSuccessor(successor);
+                sendMsg(2*Integer.parseInt(successor2), "deletekey"+seperator+"replica"+seperator+selection);
+            }
+            else{
+                //send to coordinator and its successors
+                sendMsg(2*Integer.parseInt(coOrdinator),"deletekey"+seperator+"key"+seperator+selection);
+                String successor1 = getSuccessor(coOrdinator);
+                String successor2 = getSuccessor(successor1);
+                sendMsg(2*Integer.parseInt(successor1), "deletekey"+seperator+"replica"+seperator+selection);
+                sendMsg(2*Integer.parseInt(successor2), "deletekey"+seperator+"replica"+seperator+selection);
+            }
+
+
         }
         return 0;
 	}
@@ -100,12 +142,15 @@ public class SimpleDynamoProvider extends ContentProvider {
 
         key = values.get("key").toString();
         value = values.get("value").toString();
+        Log.v(TAG,"insert-call");
+        Log.v(TAG,key);
 
         FileOutputStream outputStream;
 
         try {
 
             String keyhash = genHash(key);
+            String coOrdinator = getCoordinator(key);
             String successor_id = genHash(successor);
             String predecessor_id = genHash(predecessor);
             String datatosend = "insert";
@@ -119,74 +164,36 @@ public class SimpleDynamoProvider extends ContentProvider {
             replicadata += key;
             replicadata += seperator;
             replicadata += value;
-            replicadata += seperator;
-            replicadata += Integer.toString(1);
 
-            if(id.equals(successor_id))
+
+            if(coOrdinator.equals(portStr))
             {
-                //insert to me
+                // insert to me
                 outputStream = getContext().openFileOutput(key, Context.MODE_PRIVATE);
                 outputStream.write(value.getBytes());
                 outputStream.close();
                 Keys.add(key);
+                MyKeys.add(key);
                 Log.v(TAG,"insert");
                 Log.v(TAG, values.toString());
 
                 //Send replica
                 sendMsg(2*Integer.parseInt(successor), replicadata);
-            }
-            else if(id.compareTo(keyhash) > 0)
-            {
-                if(id.compareTo(predecessor_id) < 0) {
-                    // insert to me
-                    outputStream = getContext().openFileOutput(key, Context.MODE_PRIVATE);
-                    outputStream.write(value.getBytes());
-                    outputStream.close();
-                    Keys.add(key);
-                    Log.v(TAG,"insert");
-                    Log.v(TAG, values.toString());
 
-                    //Send replica
-                    sendMsg(2*Integer.parseInt(successor), replicadata);
-
-                }
-                else if(predecessor_id.compareTo(keyhash) > 0){
-                    // forward to predecessor
-                    sendMsg(2 * Integer.parseInt(predecessor), datatosend);
-                }
-                else if(predecessor_id.compareTo(keyhash) < 0)
-                {
-                    // insert to me
-                    outputStream = getContext().openFileOutput(key, Context.MODE_PRIVATE);
-                    outputStream.write(value.getBytes());
-                    outputStream.close();
-                    Keys.add(key);
-                    Log.v(TAG,"insert");
-                    Log.v(TAG, values.toString());
-
-                    //Send replica
-                    sendMsg(2*Integer.parseInt(successor), replicadata);
-                }
+                String successor2 = getSuccessor(successor);
+                sendMsg(2*Integer.parseInt(successor2), replicadata);
             }
             else
             {
-                if(predecessor_id.compareTo(id) > 0 && predecessor_id.compareTo(keyhash) < 0)
-                {
-                    // insert to me
-                    outputStream = getContext().openFileOutput(key, Context.MODE_PRIVATE);
-                    outputStream.write(value.getBytes());
-                    outputStream.close();
-                    Keys.add(key);
-                    Log.v(TAG,"insert");
-                    Log.v(TAG, values.toString());
-
-                    //Send replica
-                    sendMsg(2*Integer.parseInt(successor), replicadata);
-                }
-                else
-                {
-                    //send to successor
-                    sendMsg(2 * Integer.parseInt(successor), datatosend);
+                // send key-value pair to Coordinator and its successors for replicas
+                String reply = sendMsg(2*Integer.parseInt(coOrdinator), datatosend);
+                Log.v(TAG,"insert sent to coordinator");
+                Log.v(TAG,reply);
+                if(reply.equals("fail")) {
+                    String replica1 = getSuccessor(coOrdinator);
+                    String replica2 = getSuccessor(replica1);
+                    sendMsg(2 * Integer.parseInt(replica1), replicadata);
+                    sendMsg(2 * Integer.parseInt(replica2), replicadata);
                 }
             }
 
@@ -223,24 +230,46 @@ public class SimpleDynamoProvider extends ContentProvider {
 
             if(portStr.equals("5554")){
                 predecessor = "5556";
+                predecessor2 = "5562";
                 successor = "5558";
             }
             else if(portStr.equals("5556")){
                 predecessor = "5562";
+                predecessor2 = "5560";
                 successor = "5554";
             }
             else if(portStr.equals("5558")) {
                 predecessor = "5554";
+                predecessor2 = "5556";
                 successor = "5560";
             }
             else if(portStr.equals("5560")){
                 predecessor = "5558";
+                predecessor2 = "5554";
                 successor = "5562";
             }
             else if(portStr.equals("5562")){
                 predecessor = "5560";
+                predecessor2 = "5558";
                 successor = "5556";
             }
+
+            String[] files =  getContext().fileList();
+            for(int i=0; i<files.length; i++)
+            {
+                getContext().deleteFile(files[i]);
+            }
+
+            String msg = "startup";
+            new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, msg);
+
+/*
+            getKeyValues(2*Integer.parseInt(predecessor),"keys" + seperator + portStr);
+            getKeyValues(2*Integer.parseInt(predecessor2), "keys" + seperator + portStr);
+            getKeyValues(2*Integer.parseInt(successor), "missedkeys" + seperator + portStr);
+*/
+  //          sendAllNodes("recovered");
+
         } catch (NoSuchAlgorithmException e) {
             e.printStackTrace();
         }
@@ -288,8 +317,15 @@ public class SimpleDynamoProvider extends ContentProvider {
                     datatosend += seperator;
                     datatosend += portStr;
                     datatosend += seperator;
-                    sendMsg(2 * Integer.parseInt(successor), datatosend);
-                    condition = false;
+
+
+                    String reply = sendMsg(2 * Integer.parseInt(successor), datatosend);
+
+                    if (reply.equals("fail")) {
+                        String successor2 = getSuccessor(successor);
+                        sendMsg(2 * Integer.parseInt(successor2), datatosend);
+                    }
+
                     synchronized (myobject) {
                         while (!condition) {
                             try {
@@ -298,6 +334,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                                 e.printStackTrace();
                             }
                         }
+                        condition = false;
                     }
 
                     if(Gqueryvalues!=null)
@@ -327,59 +364,61 @@ public class SimpleDynamoProvider extends ContentProvider {
 
                     inputStream.close();
                 }
-            }
-            else {
-                String value = "";
-                int keyindex = search(selection);
+            } else {
 
-                Log.v(TAG,"keyindex");
-                Log.v(TAG, Integer.toString(keyindex));
+                synchronized (myobject) {
+                    String value = "";
+                    String coOrdinator = getCoordinator(selection);
+                    String coSuccessor1 = getSuccessor(coOrdinator);
+                    String coSuccessor2 = getSuccessor(coSuccessor1);
+                    Log.v(TAG, "coSuccessor2");
+                    Log.v(TAG, coSuccessor2);
 
-                if(keyindex>=0)
-                {
-                    inputStream = getContext().openFileInput(selection);
-                    while (inputStream.read(buff) != -1) {
-                        value += new String(buff);
-                    }
-                    String[] columnValue = {selection,value.trim()};
-                    cursor.addRow(columnValue);
-                    inputStream.close();
-
-                    Log.v(TAG,"value");
-                    Log.v(TAG, value);
-                }
-                else
-                {
-                    //send query to successor and wait
-                    String datatosend = "query";
-                    datatosend += seperator;
-                    datatosend += portStr;
-                    datatosend += seperator;
-                    datatosend += selection;
-
-                    sendMsg(2*Integer.parseInt(successor),datatosend);
-                    Log.v(TAG,"Sent query to");
-                    Log.v(TAG, successor);
-                    Log.v(TAG,datatosend);
-
-                    synchronized (myobject)
-                    {
-                        while(!condition)
-                        {
-                            try {
-                                myobject.wait();
-                            } catch (InterruptedException e) {
-                                e.printStackTrace();
-                            }
+                    if (coOrdinator.equals(portStr)) {
+                        //Log.v(TAG,"found");
+                        inputStream = getContext().openFileInput(selection);
+                        while (inputStream.read(buff) != -1) {
+                            value += new String(buff);
                         }
-                        condition = false;
-                    }
+                        value = value.trim();
+                        String[] columnValue = {selection, value};
+                        cursor.addRow(columnValue);
+                        inputStream.close();
 
-                    value = queryvalue;
-                    String[] columnValue = {selection,value.trim()};
-                    cursor.addRow(columnValue);
-                    Log.v(TAG,"queryvalue");
-                    Log.v(TAG, value);
+                        Log.v(TAG, "value");
+                        Log.v(TAG, value);
+                    } else {
+                        //send query to coSuccessor2 and wait
+                        String datatosend = "query";
+                        datatosend += seperator;
+                        datatosend += portStr;
+                        datatosend += seperator;
+                        datatosend += selection;
+
+                        Log.v(TAG, "Sent query to");
+                        Log.v(TAG, coOrdinator);
+                        value = sendMsg(2 * Integer.parseInt(coOrdinator), datatosend);
+
+                        if (value.equals("fail")) {
+                            //String Coordinator2 = getSuccessor(coSuccessor2);
+                            Log.v(TAG, "coOrdinator failed and query sent to coSuccessor1");
+                            Log.v(TAG, coSuccessor1);
+                            value = sendMsg(2 * Integer.parseInt(coSuccessor1), datatosend);
+
+                            if(value.equals("fail")){
+                                Log.v(TAG, "sent query to coSuccessor2");
+                                Log.v(TAG, coSuccessor2);
+                                value = sendMsg(2 * Integer.parseInt(coSuccessor2), datatosend);
+                            }
+
+                        }
+                        Log.v(TAG, datatosend);
+                        String[] columnValue = {selection, value.trim()};
+                        cursor.addRow(columnValue);
+                        Log.v(TAG, "queryvalue");
+                        Log.v(TAG, value);
+
+                    }
                 }
 
             }
@@ -392,7 +431,6 @@ public class SimpleDynamoProvider extends ContentProvider {
             e.printStackTrace();
         }
 
-        //Log.v(TAG,cursor.getString(0));
         return cursor;
 	}
 
@@ -413,18 +451,19 @@ public class SimpleDynamoProvider extends ContentProvider {
         return formatter.toString();
     }
 
-    private int search(String key)
+   /* private int search(String key)
     {
         int pos =0;
         Boolean found = false;
         Iterator<String> itr = Keys.iterator();
         String mkey = "";
 
+        if(Keys.contains(key))
+
+
         while(itr.hasNext())
         {
             mkey = itr.next();
-            //Log.v(TAG,"mkey");
-            //Log.v(TAG,mkey);
             if(key.equals(mkey))
             {
                 found = true;
@@ -441,16 +480,142 @@ public class SimpleDynamoProvider extends ContentProvider {
         else
             return -1;
 
+    }*/
+
+    private String getSuccessor(String node)
+    {
+        if(node.equals("5554"))
+        {
+            return "5558";
+        }
+        else if(node.equals("5558"))
+        {
+            return "5560";
+        }
+        else if(node.equals("5560"))
+        {
+            return "5562";
+        }
+        else if(node.equals("5562"))
+        {
+            return "5556";
+        }
+        else
+        {
+            return "5554";
+        }
+
     }
 
-    private void sendMsg(int port, String Msg)
+    private String getCoordinator(String key)
+    {
+        try
+        {
+            String keyhash = genHash(key);
+            String id0 = genHash("5554");
+            String id1 = genHash("5556");
+            String id2 = genHash("5558");
+            String id3 = genHash("5560");
+            String id4 = genHash("5562");
+
+            System.out.println(id4.compareTo(id1));
+            System.out.println(id1.compareTo(id0));
+            System.out.println(id0.compareTo(id2));
+            System.out.println(id2.compareTo(id3));
+            System.out.println(id3.compareTo(id4));
+
+            if(keyhash.compareTo(id4) >= 0 && keyhash.compareTo(id1) < 0)
+            {
+                return "5556";
+            }
+            else if(keyhash.compareTo(id1) >= 0 && keyhash.compareTo(id0) < 0)
+            {
+                return "5554";
+            }
+            else if(keyhash.compareTo(id0) >= 0 && keyhash.compareTo(id2) < 0)
+            {
+                return "5558";
+            }
+            else if(keyhash.compareTo(id2) >= 0 && keyhash.compareTo(id3) < 0)
+            {
+                return "5560";
+            }
+            else
+            {
+                return "5562";
+            }
+        }
+        catch(NoSuchAlgorithmException e)
+        {
+            e.printStackTrace();
+        }
+
+        return "";
+
+    }
+
+    private String sendMsg(int port, String Msg)
+    {
+        String reply = "fail";
+        try {
+            Socket socket = new Socket(InetAddress.getByAddress(new byte[] {10,0,2,2}),port);
+            socket.setSoTimeout(500);
+            DataOutputStream output = new DataOutputStream(socket.getOutputStream());
+            output.writeUTF(Msg);
+            DataInputStream input = new DataInputStream(socket.getInputStream());
+            reply = input.readUTF();
+
+            /*OutputStream outputStream = socket.getOutputStream();
+            BufferedWriter out = new BufferedWriter(new OutputStreamWriter(outputStream));
+            out.write(Msg+"\n");
+
+            InputStream inputStream = socket.getInputStream();
+            BufferedReader in = new BufferedReader(new InputStreamReader(inputStream));
+            reply = in.readLine();*/
+
+            Log.v(TAG,"reply");
+            Log.v(TAG,reply);
+
+        } catch (IOException e) {
+            e.printStackTrace();
+            failedprocess = Integer.toString(port/2);
+            Log.v("process failed ID:",failedprocess);
+        }
+
+        return reply;
+    }
+
+    private void getKeyValues(int port, String Msg)
     {
         try {
             Socket socket = new Socket(InetAddress.getByAddress(new byte[] {10,0,2,2}),port);
+            socket.setSoTimeout(500);
             DataOutputStream output = new DataOutputStream(socket.getOutputStream());
             output.writeUTF(Msg);
+            /*OutputStream outputStream = socket.getOutputStream();
+            BufferedWriter out = new BufferedWriter(new OutputStreamWriter(outputStream));
+            out.write(Msg+"\n");*/
         } catch (IOException e) {
             e.printStackTrace();
+        }
+
+    }
+
+    private void sendAllNodes(String Msg)
+    {
+        for(int i=0; i<5; i++)
+        {
+            try {
+                Socket socket = new Socket(InetAddress.getByAddress(new byte[] {10,0,2,2}),11108+4*i);
+                socket.setSoTimeout(500);
+                DataOutputStream output = new DataOutputStream(socket.getOutputStream());
+                output.writeUTF(Msg);
+                /*OutputStream outputStream = socket.getOutputStream();
+                BufferedWriter out = new BufferedWriter(new OutputStreamWriter(outputStream));
+                out.write(Msg+"\n");*/
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
         }
     }
 
@@ -466,6 +631,32 @@ public class SimpleDynamoProvider extends ContentProvider {
         @Override
         protected Void doInBackground(String... msgs)
         {
+          if(msgs[0].equals("startup")){
+              getKeyValues(2*Integer.parseInt(predecessor),"keys" + seperator + portStr);
+              getKeyValues(2*Integer.parseInt(predecessor2), "keys" + seperator + portStr);
+              getKeyValues(2*Integer.parseInt(successor), "missedkeys" + seperator + portStr);
+
+              sendAllNodes("recovered");
+              /*Log.v(TAG,"Sending startup");
+              Socket socket = null;
+              try {
+                  socket = new Socket(InetAddress.getByAddress(new byte[] {10,0,2,2}),2*Integer.parseInt(portStr));
+                  socket.setSoTimeout(1000);
+                  DataOutputStream output = new DataOutputStream(socket.getOutputStream());
+                  output.writeUTF(Msg);
+                  *//*BufferedWriter out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
+                  out.write("recovered");*//*
+              } catch (UnknownHostException e) {
+                  e.printStackTrace();
+              } catch (SocketException e) {
+                  e.printStackTrace();
+              } catch (IOException e) {
+                  e.printStackTrace();
+              }*/
+
+              Log.v(TAG,"Sent startup");
+
+          }
           return null;
         }
     }
@@ -483,23 +674,56 @@ public class SimpleDynamoProvider extends ContentProvider {
                     newsocket = serverSocket.accept();
                     DataInputStream input = new DataInputStream(newsocket.getInputStream());
                     String dataRead = input.readUTF();
-                    String datatosend = "";
+                    /*InputStream input = newsocket.getInputStream();
+                    BufferedReader in = new BufferedReader(new InputStreamReader(input));
+                    String dataRead  = in.readLine();*/
+                    Log.v(TAG,"dataRead");
+                    Log.v(TAG,dataRead);
 
-                    Scanner s = new Scanner(dataRead).useDelimiter(seperator);
-                    String type = s.next();
+                    String datatosend = "";
+                    DataOutputStream dataoutputStream = new DataOutputStream(newsocket.getOutputStream());
+                    /*OutputStream output = newsocket.getOutputStream();
+                    BufferedWriter out = new BufferedWriter(new OutputStreamWriter(output));*/
+                    String receivedmsg = "pass";
+
+                    //Scanner s = new Scanner(dataRead).useDelimiter(seperator);
+                    String[] dsv = dataRead.split(seperator);
+                    String type = dsv[0];
                     Log.v(TAG,type);
 
                     if(type.equals("insert")) {
-                        mUri = buildUri("content","edu.buffalo.cse.cse486586.simpledynamo.provider");
-                        mContentValue = new ContentValues();
-                        mContentValue.put("key",s.next());
-                        mContentValue.put("value",s.next());
-                        insert(mUri,mContentValue);
+                        String  key = dsv[1];
+                        String  value = dsv[2];
+
+                        FileOutputStream outputStream = getContext().openFileOutput(key, Context.MODE_PRIVATE);
+                        outputStream.write(value.getBytes());
+                        outputStream.close();
+
+                        Keys.add(key);
+                        MyKeys.add(key);
+                        Log.v(TAG,"insert");
+                        Log.v(TAG,"key,value");
+                        Log.v(TAG,key);
+                        Log.v(TAG, value);
+
+                        //send replicas
+                        datatosend += "replica";
+                        datatosend += seperator;
+                        datatosend += key;
+                        datatosend += seperator;
+                        datatosend += value;
+
+                        sendMsg(2*Integer.parseInt(successor), datatosend);
+                        String successor2 = getSuccessor(successor);
+                        sendMsg(2*Integer.parseInt(successor2), datatosend);
+
+                        dataoutputStream.writeUTF(receivedmsg);
+                        //out.write(receivedmsg);
+
                     }
                     else if(type.equals("replica")) {
-                        String  key = s.next();
-                        String  value = s.next();
-                        int count = s.nextInt();
+                        String  key = dsv[1];
+                        String  value = dsv[2];
 
                         FileOutputStream outputStream = getContext().openFileOutput(key, Context.MODE_PRIVATE);
                         outputStream.write(value.getBytes());
@@ -510,63 +734,41 @@ public class SimpleDynamoProvider extends ContentProvider {
                         Log.v(TAG,key);
                         Log.v(TAG, value);
 
-                        if(count == 1) {
-                            datatosend = "replica";
+                        dataoutputStream.writeUTF(receivedmsg);
+                        //out.write(receivedmsg);
+
+                    } else if (type.equals("query")) {
+                        String clientport = dsv[1];
+                        String searchkey = dsv[2];
+
+                        if (Keys.contains(searchkey)) {
+
+                            Log.v(TAG,"found");
+                            byte[] buff = new byte[100];
+                            String value = "";
+                            FileInputStream inputStream = getContext().openFileInput(searchkey);
+                            while (inputStream.read(buff) != -1) {
+                                value += new String(buff);
+                            }
+                            value = value.trim();
+                            datatosend = "query";
                             datatosend += seperator;
-                            datatosend += key;
+                            datatosend += clientport;
                             datatosend += seperator;
                             datatosend += value;
-                            datatosend += seperator;
-                            datatosend += Integer.toString(2);
 
-                            sendMsg(2*Integer.parseInt(successor),datatosend);
-                        }
+                            Log.v(TAG, "foundvalue");
+                            Log.v(TAG, value);
 
-                    }
-                    else if(type.equals("query"))
-                    {
-                        String clientport = s.next();
-                        if(clientport.equals(portStr))
-                        {
-                            queryvalue = s.next();
-                            Log.v(TAG,"queryvalueserver");
-                            Log.v(TAG,queryvalue);
-                            synchronized (myobject)
-                            {
-                                condition = true;
-                                myobject.notify();
-                            }
-                        }
-                        else
-                        {
-                            String searchkey = s.next();
-                            if (search(searchkey) >= 0) {
-                                byte[] buff = new byte[100];
-                                String value = "";
-                                FileInputStream inputStream = getContext().openFileInput(searchkey);
-                                while (inputStream.read(buff) != -1) {
-                                    value += new String(buff);
-                                }
-                                datatosend = "query";
-                                datatosend += seperator;
-                                datatosend += clientport;
-                                datatosend += seperator;
-                                datatosend += value;
-
-                                sendMsg(2 * Integer.parseInt(clientport), datatosend);
-                                Log.v(TAG,"foundvalue");
-                                Log.v(TAG,value);
-                            } else {
-                                //forward query to successor
-                                sendMsg(2 * Integer.parseInt(successor), dataRead);
-                            }
+                            dataoutputStream.writeUTF(value);
+                            //out.write(value+"\n");
                         }
                     }
                     else if(type.equals("Gquery"))
                     {
                         Log.v(TAG,"GqueryDataread");
                         Log.v(TAG,dataRead);
-                        String clientport = s.next();
+                        String clientport = dsv[1];
                         if(clientport.equals(portStr))
                         {
                             String[] reply = dataRead.split(seperator);
@@ -576,13 +778,16 @@ public class SimpleDynamoProvider extends ContentProvider {
                             if(reply.length == 2)
                                 Gqueryvalues = null;
                             else
-                                Gqueryvalues = s.next();
+                                Gqueryvalues = dsv[2];
 
                             synchronized (myobject)
                             {
                                 condition = true;
                                 myobject.notify();
                             }
+
+                            dataoutputStream.writeUTF(receivedmsg);
+                            //out.write(receivedmsg);
                         }
                         else
                         {
@@ -590,7 +795,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                             FileInputStream inputStream;
                             byte[] buff = new byte[100];
                             datatosend = dataRead;
-                            //datatosend += seperator;
+
                             for(int i=0; i<Keys.size(); i++)
                             {
                                 String value = "";
@@ -607,22 +812,152 @@ public class SimpleDynamoProvider extends ContentProvider {
                                 inputStream.close();
                             }
 
-                            sendMsg(2*Integer.parseInt(successor),datatosend);
+                            String reply = sendMsg(2*Integer.parseInt(successor),datatosend);
+
+                            if (reply.equals("fail")) {
+                                String successor2 = getSuccessor(successor);
+                                sendMsg(2 * Integer.parseInt(successor2), datatosend);
+                            }
+
+                            dataoutputStream.writeUTF(receivedmsg);
+                            //out.write(receivedmsg);
                         }
                     }
                     else if(type.equals("delete"))
                     {
-                        String clientport = s.next();
+                        String clientport = dsv[1];
                         if(!clientport.equals(portStr))
                         {
                             //delete all my keys and forward to successor
                             mUri = buildUri("content","edu.buffalo.cse.cse486586.simpledynamo.provider");
                             delete(mUri,"*",null);
 
-                            sendMsg(2*Integer.parseInt(successor),dataRead);
+                            String reply = sendMsg(2*Integer.parseInt(successor),dataRead);
+
+                            if (reply.equals("fail")) {
+                                String successor2 = getSuccessor(successor);
+                                sendMsg(2 * Integer.parseInt(successor2), dataRead);
+                            }
 
                         }
+                        dataoutputStream.writeUTF(receivedmsg);
+                        //out.write(receivedmsg);
                     }
+                    else if(type.equals("keys"))
+                    {
+                        String client = dsv[1];
+                        //add my key-values and send to client
+                        FileInputStream inputStream;
+                        byte[] buff = new byte[100];
+                        datatosend = "keysreply";
+                        datatosend += seperator;
+                        datatosend += "replicas";
+                        datatosend += seperator;
+
+                        for(int i=0; i<MyKeys.size(); i++)
+                        {
+                            String value = "";
+                            inputStream = getContext().openFileInput(MyKeys.get(i));
+                            while(inputStream.read(buff) != -1)
+                            {
+                                value += new String(buff);
+                            }
+
+                            datatosend += MyKeys.get(i);
+                            datatosend += "--";
+                            datatosend += value.trim();
+                            datatosend += "##";
+                            inputStream.close();
+                        }
+
+                        sendMsg(2*Integer.parseInt(client),datatosend);
+                    }
+                    else if(type.equals("missedkeys"))
+                    {
+                        String client = dsv[1];
+                        //add key values missed by client and send to client
+                        FileInputStream inputStream;
+                        byte[] buff = new byte[100];
+                        datatosend = "keysreply";
+                        datatosend += seperator;
+                        datatosend += "missedkeys";
+                        datatosend += seperator;
+
+                        for(int i=0; i<Keys.size(); i++)
+                        {
+                            if(client.equals(getCoordinator(Keys.get(i)))) {
+                                String value = "";
+                                inputStream = getContext().openFileInput(Keys.get(i));
+                                while (inputStream.read(buff) != -1) {
+                                    value += new String(buff);
+                                }
+
+                                datatosend += Keys.get(i);
+                                datatosend += "--";
+                                datatosend += value.trim();
+                                datatosend += "##";
+                                inputStream.close();
+                            }
+                        }
+
+                        sendMsg(2*Integer.parseInt(client),datatosend);
+                    }
+                    else if(type.equals("keysreply"))
+                    {
+                        String keyvalueType = dsv[1];
+
+                        if(dsv.length>2) {
+                            String keyvalues = dsv[2];
+                            Log.v(TAG, "keyvalueType, keyvalues");
+                            Log.v(TAG, keyvalueType);
+                            Log.v(TAG, keyvalues);
+                            String[] kvpairs = keyvalues.split("##");
+
+                            for (int i = 0; i < kvpairs.length; i++) {
+                                String[] kvpair = kvpairs[i].split("--");
+
+                                FileOutputStream outputStream = getContext().openFileOutput(kvpair[0], Context.MODE_PRIVATE);
+                                outputStream.write(kvpair[1].getBytes());
+                                outputStream.close();
+
+                                Keys.add(kvpair[0]);
+
+                                if (keyvalueType.equals("missedkeys"))
+                                    MyKeys.add(kvpair[0]);
+
+                            }
+                        }
+
+                        dataoutputStream.writeUTF(receivedmsg);
+                       // out.write(receivedmsg);
+                    }
+                    else if(type.equals("deletekey"))
+                    {
+                        String keytype = dsv[1];
+                        String key = dsv[2];
+
+                        getContext().deleteFile(key);
+                        Keys.remove(key);
+
+                        if(keytype.equals("key"))
+                            MyKeys.remove(key);
+
+                        Log.v(TAG,"keytype,key");
+                        Log.v(TAG, keytype);
+                        Log.v(TAG, key);
+
+                        dataoutputStream.writeUTF(receivedmsg);
+
+                    }
+                    else if(type.equals("recovered"))
+                    {
+                        failedprocess = "";
+                    }
+
+
+                    dataoutputStream.close();
+                    //out.close();
+                    newsocket.close();
 
                 } catch (IOException e) {
                     e.printStackTrace();
