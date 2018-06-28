@@ -50,9 +50,12 @@ public class SimpleDynamoProvider extends ContentProvider {
     private String predecessor2 = "";
     private String successor = "";
     private String portStr = "";
-    private  static final Object myobject = new Object();
+    private static Object myobject = new Object();
+    private static Object deletelock = new Object();
+    private static Object insertlock = new Object();
     private boolean condition = false;
-    private String queryvalue = "";
+    private static  String querykey = "";
+    private static  String queryvalue = "";
     private String Gqueryvalues = "";
     private static String failedprocess = "";
 
@@ -71,61 +74,57 @@ public class SimpleDynamoProvider extends ContentProvider {
         Log.v(TAG, "delete");
         Log.v(TAG,selection);
 
-        if(selection.equals("*"))
-        {
-            for(int i=0; i< Keys.size(); i++)
-            {
-                getContext().deleteFile(Keys.get(i));
-            }
-            Keys.clear();
-            MyKeys.clear();
+        synchronized (deletelock) {
+            if (selection.equals("*")) {
+                for (int i = 0; i < Keys.size(); i++) {
+                    getContext().deleteFile(Keys.get(i));
+                }
+                Keys.clear();
+                MyKeys.clear();
 
-            //send msg to successor to delete
-            String datatosend = "delete";
-            datatosend += seperator;
-            datatosend += portStr;
+                //send msg to successor to delete
+                String datatosend = "delete";
+                datatosend += seperator;
+                datatosend += portStr;
 
-            String reply = sendMsg(2 * Integer.parseInt(successor), datatosend);
-            if(reply.equals("fail"))
-            {
-                String successor2 = getSuccessor(successor);
-                sendMsg(2 * Integer.parseInt(successor2), datatosend);
+                //sendAllNodes("delete"+seperator+portStr);
+
+                String reply = sendMsg(2 * Integer.parseInt(successor), datatosend);
+                if (reply.equals("fail")) {
+                    String successor2 = getSuccessor(successor);
+                    sendMsg(2 * Integer.parseInt(successor2), datatosend);
+                }
+            } else if (selection.equals("@")) {
+                for (int i = 0; i < Keys.size(); i++) {
+                    getContext().deleteFile(Keys.get(i));
+                }
+                Keys.clear();
+                MyKeys.clear();
+            } else {
+
+                String coOrdinator = getCoordinator(selection);
+                if (coOrdinator.equals(portStr)) {
+                    // delete and send to successors to delete
+                    getContext().deleteFile(selection);
+                    Keys.remove(selection);
+                    MyKeys.remove(selection);
+
+                    sendMsg(2 * Integer.parseInt(successor), "deletekey" + seperator + "replica" + seperator + selection);
+                    String successor2 = getSuccessor(successor);
+                    sendMsg(2 * Integer.parseInt(successor2), "deletekey" + seperator + "replica" + seperator + selection);
+                } else {
+                    //send to coordinator and its successors
+                    sendMsg(2 * Integer.parseInt(coOrdinator), "deletekey" + seperator + "key" + seperator + selection);
+                    String successor1 = getSuccessor(coOrdinator);
+                    String successor2 = getSuccessor(successor1);
+                    sendMsg(2 * Integer.parseInt(successor1), "deletekey" + seperator + "replica" + seperator + selection);
+                    sendMsg(2 * Integer.parseInt(successor2), "deletekey" + seperator + "replica" + seperator + selection);
+                }
+
+
             }
         }
-        else if(selection.equals("@"))
-        {
-            for(int i=0; i< Keys.size(); i++)
-            {
-                getContext().deleteFile(Keys.get(i));
-            }
-            Keys.clear();
-            MyKeys.clear();
-        }
-        else
-        {
 
-            String coOrdinator = getCoordinator(selection);
-            if(coOrdinator.equals(portStr)) {
-                // delete and send to successors to delete
-                getContext().deleteFile(selection);
-                Keys.remove(selection);
-                MyKeys.remove(selection);
-
-                sendMsg(2*Integer.parseInt(successor),"deletekey"+seperator+"replica"+seperator+selection);
-                String successor2 = getSuccessor(successor);
-                sendMsg(2*Integer.parseInt(successor2), "deletekey"+seperator+"replica"+seperator+selection);
-            }
-            else{
-                //send to coordinator and its successors
-                sendMsg(2*Integer.parseInt(coOrdinator),"deletekey"+seperator+"key"+seperator+selection);
-                String successor1 = getSuccessor(coOrdinator);
-                String successor2 = getSuccessor(successor1);
-                sendMsg(2*Integer.parseInt(successor1), "deletekey"+seperator+"replica"+seperator+selection);
-                sendMsg(2*Integer.parseInt(successor2), "deletekey"+seperator+"replica"+seperator+selection);
-            }
-
-
-        }
         return 0;
 	}
 
@@ -165,46 +164,44 @@ public class SimpleDynamoProvider extends ContentProvider {
             replicadata += seperator;
             replicadata += value;
 
+            synchronized (insertlock) {
+                if (coOrdinator.equals(portStr)) {
+                    // insert to me
+                    outputStream = getContext().openFileOutput(key, Context.MODE_PRIVATE);
+                    outputStream.write(value.getBytes());
+                    outputStream.close();
+                    Keys.add(key);
+                    MyKeys.add(key);
+                    Log.v(TAG, "insert");
+                    Log.v(TAG, values.toString());
 
-            if(coOrdinator.equals(portStr))
-            {
-                // insert to me
-                outputStream = getContext().openFileOutput(key, Context.MODE_PRIVATE);
-                outputStream.write(value.getBytes());
-                outputStream.close();
-                Keys.add(key);
-                MyKeys.add(key);
-                Log.v(TAG,"insert");
-                Log.v(TAG, values.toString());
+                    //Send replica
+                    sendMsg(2 * Integer.parseInt(successor), replicadata);
 
-                //Send replica
-                sendMsg(2*Integer.parseInt(successor), replicadata);
-
-                String successor2 = getSuccessor(successor);
-                sendMsg(2*Integer.parseInt(successor2), replicadata);
-            }
-            else
-            {
-                // send key-value pair to Coordinator and its successors for replicas
-                String reply = sendMsg(2*Integer.parseInt(coOrdinator), datatosend);
-                Log.v(TAG,"insert sent to coordinator");
-                Log.v(TAG,reply);
-                if(reply.equals("fail")) {
-                    String replica1 = getSuccessor(coOrdinator);
-                    String replica2 = getSuccessor(replica1);
-                    sendMsg(2 * Integer.parseInt(replica1), replicadata);
-                    sendMsg(2 * Integer.parseInt(replica2), replicadata);
+                    String successor2 = getSuccessor(successor);
+                    sendMsg(2 * Integer.parseInt(successor2), replicadata);
+                } else {
+                    // send key-value pair to Coordinator and its successors for replicas
+                    String reply = sendMsg(2 * Integer.parseInt(coOrdinator), datatosend);
+                    Log.v(TAG, "insert sent to coordinator");
+                    Log.v(TAG, reply);
+                    if (reply.equals("fail")) {
+                        String replica1 = getSuccessor(coOrdinator);
+                        String replica2 = getSuccessor(replica1);
+                        sendMsg(2 * Integer.parseInt(replica1), replicadata);
+                        sendMsg(2 * Integer.parseInt(replica2), replicadata);
+                    }
                 }
+
             }
-
-
         } catch (IOException e) {
             e.printStackTrace();
         } catch (NoSuchAlgorithmException e) {
             e.printStackTrace();
         }
-		return null;
-	}
+
+        return null;
+    }
 
 	@Override
 	public boolean onCreate() {
@@ -365,16 +362,18 @@ public class SimpleDynamoProvider extends ContentProvider {
                     inputStream.close();
                 }
             } else {
-
+                /*
                 synchronized (myobject) {
+                    querykey = selection;
+                    condition = false;
                     String value = "";
                     String coOrdinator = getCoordinator(selection);
                     String coSuccessor1 = getSuccessor(coOrdinator);
                     String coSuccessor2 = getSuccessor(coSuccessor1);
-                    Log.v(TAG, "coSuccessor2");
-                    Log.v(TAG, coSuccessor2);
+                    Log.v(TAG, "coOrdinator");
+                    Log.v(TAG, coOrdinator);
 
-                    if (coOrdinator.equals(portStr)) {
+                    if (false) {
                         //Log.v(TAG,"found");
                         inputStream = getContext().openFileInput(selection);
                         while (inputStream.read(buff) != -1) {
@@ -388,18 +387,33 @@ public class SimpleDynamoProvider extends ContentProvider {
                         Log.v(TAG, "value");
                         Log.v(TAG, value);
                     } else {
-                        //send query to coSuccessor2 and wait
+                        //send query to coSuccessor2, coSuccessor1 and wait
                         String datatosend = "query";
                         datatosend += seperator;
                         datatosend += portStr;
                         datatosend += seperator;
                         datatosend += selection;
 
-                        Log.v(TAG, "Sent query to");
+                        Log.v(TAG, "Sent query to coOrdinator and coSuccessor1");
                         Log.v(TAG, coOrdinator);
-                        value = sendMsg(2 * Integer.parseInt(coOrdinator), datatosend);
 
-                        if (value.equals("fail")) {
+                        sendMsg(2 * Integer.parseInt(coOrdinator),datatosend,false);
+                        sendMsg(2*Integer.parseInt(coSuccessor1),datatosend,false);
+                        Log.v(TAG, "datatosend");
+                        Log.v(TAG, datatosend);
+                        Log.v(TAG,"condition");
+                        Log.v(TAG,condition+"");
+                        while (!condition) {
+                            try {
+                                myobject.wait();
+                            } catch (InterruptedException e) {
+                                e.printStackTrace();
+                            }
+                        }
+                        Log.d(TAG,"Out of while lopp");
+                        condition = false;
+*/
+                        /*if (value.equals("fail")) {
                             //String Coordinator2 = getSuccessor(coSuccessor2);
                             Log.v(TAG, "coOrdinator failed and query sent to coSuccessor1");
                             Log.v(TAG, coSuccessor1);
@@ -411,15 +425,16 @@ public class SimpleDynamoProvider extends ContentProvider {
                                 value = sendMsg(2 * Integer.parseInt(coSuccessor2), datatosend);
                             }
 
-                        }
-                        Log.v(TAG, datatosend);
-                        String[] columnValue = {selection, value.trim()};
+                        }*/
+
+                        querykey(selection);
+                        String[] columnValue = {selection, queryvalue.trim()};
                         cursor.addRow(columnValue);
                         Log.v(TAG, "queryvalue");
-                        Log.v(TAG, value);
+                        Log.v(TAG, queryvalue);
 
-                    }
-                }
+         //           }
+              //  }
 
             }
 
@@ -440,6 +455,48 @@ public class SimpleDynamoProvider extends ContentProvider {
 		// TODO Auto-generated method stub
 		return 0;
 	}
+
+	private synchronized String querykey(String key)
+    {
+        querykey = key;
+        condition = false;
+        String value = "";
+        String coOrdinator = getCoordinator(querykey);
+        String coSuccessor1 = getSuccessor(coOrdinator);
+        String coSuccessor2 = getSuccessor(coSuccessor1);
+        Log.v(TAG, "coOrdinator");
+        Log.v(TAG, coOrdinator);
+
+        //send query to coSuccessor2, coSuccessor1 and wait
+        String datatosend = "query";
+        datatosend += seperator;
+        datatosend += portStr;
+        datatosend += seperator;
+        datatosend += querykey;
+
+        Log.v(TAG, "Sent query to coOrdinator and coSuccessor1");
+        Log.v(TAG, coOrdinator);
+
+        sendMsg(2 * Integer.parseInt(coOrdinator),datatosend,false);
+        sendMsg(2*Integer.parseInt(coSuccessor1),datatosend,false);
+        Log.v(TAG, "datatosend");
+        Log.v(TAG, datatosend);
+        Log.v(TAG,"condition");
+        Log.v(TAG,condition+"");
+
+        while (!condition) {
+            /*try {
+                myobject.wait();
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }*/
+        }
+        Log.d(TAG,"Out of while lopp");
+        condition = false;
+
+        return queryvalue;
+
+    }
 
     private String genHash(String input) throws NoSuchAlgorithmException {
         MessageDigest sha1 = MessageDigest.getInstance("SHA-1");
@@ -553,8 +610,12 @@ public class SimpleDynamoProvider extends ContentProvider {
         return "";
 
     }
-
     private String sendMsg(int port, String Msg)
+    {
+        return sendMsg(port,Msg,true);
+    }
+
+    private String sendMsg(int port, String Msg, boolean read)
     {
         String reply = "fail";
         try {
@@ -562,8 +623,14 @@ public class SimpleDynamoProvider extends ContentProvider {
             socket.setSoTimeout(500);
             DataOutputStream output = new DataOutputStream(socket.getOutputStream());
             output.writeUTF(Msg);
-            DataInputStream input = new DataInputStream(socket.getInputStream());
-            reply = input.readUTF();
+
+            if(read == true) {
+                DataInputStream input = new DataInputStream(socket.getInputStream());
+                reply = input.readUTF();
+
+                Log.v(TAG, "reply");
+                Log.v(TAG, reply);
+            }
 
             /*OutputStream outputStream = socket.getOutputStream();
             BufferedWriter out = new BufferedWriter(new OutputStreamWriter(outputStream));
@@ -573,8 +640,7 @@ public class SimpleDynamoProvider extends ContentProvider {
             BufferedReader in = new BufferedReader(new InputStreamReader(inputStream));
             reply = in.readLine();*/
 
-            Log.v(TAG,"reply");
-            Log.v(TAG,reply);
+
 
         } catch (IOException e) {
             e.printStackTrace();
@@ -741,6 +807,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                         String clientport = dsv[1];
                         String searchkey = dsv[2];
 
+
                         if (Keys.contains(searchkey)) {
 
                             Log.v(TAG,"found");
@@ -751,18 +818,36 @@ public class SimpleDynamoProvider extends ContentProvider {
                                 value += new String(buff);
                             }
                             value = value.trim();
-                            datatosend = "query";
+                            datatosend = "queryreply";
                             datatosend += seperator;
-                            datatosend += clientport;
+                            datatosend += searchkey;
                             datatosend += seperator;
-                            datatosend += value;
+                            datatosend += value.trim();
 
                             Log.v(TAG, "foundvalue");
                             Log.v(TAG, value);
-
-                            dataoutputStream.writeUTF(value);
+                            sendMsg(2*Integer.parseInt(clientport),datatosend,false);
+                            //dataoutputStream.writeUTF(value);
                             //out.write(value+"\n");
                         }
+                    }
+                    else if(type.equals("queryreply"))
+                    {
+                        if(dsv[1].equals(querykey) && !dsv[2].equals(queryvalue)) {
+                            queryvalue = dsv[2];
+                            Log.v(TAG, "querykey, queryvalue");
+                            Log.v(TAG, querykey);
+                            Log.v(TAG, queryvalue);
+
+                            condition = true;
+                            /*synchronized (myobject)
+                            {
+                                condition = true;
+                                myobject.notify();
+                            }*/
+                        }
+
+
                     }
                     else if(type.equals("Gquery"))
                     {
