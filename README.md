@@ -1,5 +1,5 @@
 # SimpleDynamo
-Implement a simplified version of the Amazon Dynamo key-value storage system. A distributed key-value storage system that provides both
+Implemented a simplified version of the Amazon Dynamo key-value storage system. A distributed key-value storage system that provides both
 availability and linearizability and performs successful read and write operations even in the presence of failures.
 
 Linearizability is implemented using Chain replication. A write is always made to the first partition,and then propagates to the next two
